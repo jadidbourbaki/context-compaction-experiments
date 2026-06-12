@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# experiment data (downloaded from Kaggle, see data/README.md)
+data/*.csv
+
+# experiment run log, committed for reproducibility
+!results/run.log
