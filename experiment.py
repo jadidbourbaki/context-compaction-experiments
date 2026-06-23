@@ -457,6 +457,11 @@ def cmd_plot(args: argparse.Namespace) -> None:
                  len(valid) - len(deduped))
     records = list(deduped.values())
 
+    # OpenAI's compaction output is returned encrypted, so its size is not a
+    # natural-language budget comparable to a Bloom filter. Restrict the plot
+    # to Claude, whose compaction output is plaintext.
+    records = [r for r in records if r.get("arm") == "claude"]
+
     # Membership error rate = incorrect answers / total queries (what
     # score() records). Counts both error types, so an all-"no" compactor
     # scores ~0.5 (chance) rather than a misleadingly low FPR. Bloom and
@@ -485,7 +490,9 @@ def cmd_plot(args: argparse.Namespace) -> None:
     # The x-axis is the total compaction budget in Kbits. Bloom's frontier is
     # a per-item rate, so convert with the (shared) item count n.
     n_items = records[0]["n"] if records else 1
-    totals = [r["bits_per_item"] * r["n"] / 1000 for r in records]
+    # Budget = raw size in bits of the natural-language summary (chars x 8),
+    # the space the summary actually occupies in the context window.
+    totals = [r["summary_chars"] * 8 / 1000 for r in records]
 
     fig, ax = plt.subplots(figsize=(6, 4.0))
     xmax = max(totals) * 1.15 if totals else 2.0 * n_items / 1000
@@ -513,7 +520,7 @@ def cmd_plot(args: argparse.Namespace) -> None:
     for r in records:
         by_arm.setdefault(r["arm"], []).append(r)
     for arm, rs in by_arm.items():
-        xs = [r["bits_per_item"] * r["n"] / 1000 for r in rs]
+        xs = [r["summary_chars"] * 8 / 1000 for r in rs]
         ys = [r["error_rate"] for r in rs]
         ax.plot(xs, ys, marker=markers.get(arm, "o"), linestyle="none",
                 markersize=7, color="black", markerfacecolor="none",

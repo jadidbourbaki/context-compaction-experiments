@@ -2,6 +2,3 @@ arm,dataset,model,n,seed,bits_per_item,error_rate,false_positive_rate,false_nega
 claude,urls,claude-opus-4-8,15000,42,0.5408,0.505,0.04,0.97,0
 claude,urls,claude-opus-4-8,15000,43,0.52,0.535,0.28,0.79,0
 claude,urls,claude-opus-4-8,15000,44,0.5802666666666667,0.555,0.48,0.63,0
-openai,urls,gpt-5.5,15000,42,0.9925333333333334,0.465,0.82,0.11,0
-openai,urls,gpt-5.5,15000,43,1.5728,0.525,0.39,0.66,0
-openai,urls,gpt-5.5,15000,44,1.0128,0.48,0.36,0.6,13
