@@ -36,6 +36,15 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import anthropic
+import matplotlib
+import numpy as np
+from openai import OpenAI
+
+matplotlib.use("Agg")  # must come before the pyplot import
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
+
 log = logging.getLogger("experiment")
 
 # Fable 5 refuses bulk URL lists (cyber safeguard); Opus 4.8 is newest that doesn't.
@@ -215,8 +224,6 @@ def run_claude(
     """Claude server-side compaction with membership-preserving instructions.
     https://platform.claude.com/docs/en/build-with-claude/compaction
     """
-    import anthropic
-
     # Bounded timeout: the compaction call occasionally stalls for tens of minutes.
     client = anthropic.Anthropic(timeout=300.0, max_retries=3)
     messages = conversation(members)
@@ -302,6 +309,57 @@ def run_claude(
     return record
 
 
+def run_claude_full_context(
+    members: list[str],
+    member_qs: list[str],
+    non_member_qs: list[str],
+    model: str,
+) -> dict:
+    """Control that keeps the whole set in context and answers the same queries.
+
+    Any error here is the model's own answering error, not compaction loss. The
+    set is sent as one cached block, so it is billed once and read cheaply per
+    query rather than re-billed in full."""
+    n = len(members)
+    listing = "\n".join(members)
+    full_bits = 8 * len(listing)
+
+    client = anthropic.Anthropic(timeout=300.0, max_retries=3)
+    # The full set, cached once and reused across queries.
+    base = [
+        {"role": "user", "content": SCAN_PROMPT},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": listing,
+             "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": DONE_PROMPT},
+        {"role": "assistant", "content": "OK"},
+    ]
+    log.info("full-context control: %d items (%d chars) held in context, no "
+             "compaction", n, len(listing))
+
+    # No compaction beta here, so the full set stays in context. Prompt caching
+    # is GA and needs no beta header.
+    def ask(item: str) -> str | None:
+        try:
+            reply = client.messages.create(
+                model=model,
+                max_tokens=QUERY_MAX_TOKENS,
+                messages=base + [
+                    {"role": "user", "content": QUERY_PROMPT.format(item=item)}],
+                output_config=CLAUDE_OUTPUT_CONFIG,
+            )
+            text = "".join(b.text for b in reply.content if b.type == "text")
+            return json.loads(text)["answer"]
+        except Exception as e:
+            log.warning("query failed: %s", e)
+            return None
+
+    record = {"arm": "claude-full", "model": model, "n": n,
+              "bits_per_item": full_bits / n, "full_context_chars": len(listing)}
+    record.update(score(*run_queries(ask, member_qs, non_member_qs)))
+    return record
+
+
 def run_openai(
     members: list[str],
     member_qs: list[str],
@@ -313,8 +371,6 @@ def run_openai(
     measured size is of the artifact carried forward, not a readable summary.
     https://developers.openai.com/api/docs/guides/compaction
     """
-    from openai import OpenAI
-
     client = OpenAI(timeout=300.0, max_retries=3)
     log.info("compacting %d items with %s", len(members), model)
     compacted = client.responses.compact(model=model, input=conversation(members))
@@ -406,7 +462,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     dump_prompts(args, members, member_qs, non_member_qs)
 
-    if args.arm == "claude":
+    if args.arm == "claude" and args.no_compaction:
+        record = run_claude_full_context(
+            members, member_qs, non_member_qs, args.claude_model
+        )
+    elif args.arm == "claude":
         record = run_claude(
             members, member_qs, non_member_qs, args.claude_model
         )
@@ -432,13 +492,6 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_plot(args: argparse.Namespace) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from matplotlib.lines import Line2D
-
     records = []
     if args.results.exists():
         with open(args.results, encoding="utf-8") as f:
@@ -457,9 +510,8 @@ def cmd_plot(args: argparse.Namespace) -> None:
                  len(valid) - len(deduped))
     records = list(deduped.values())
 
-    # OpenAI's compaction output is returned encrypted, so its size is not a
-    # natural-language budget comparable to a Bloom filter. Restrict the plot
-    # to Claude, whose compaction output is plaintext.
+    # OpenAI returns encrypted compaction output whose size is not comparable to
+    # a Bloom filter, so plot Claude only.
     records = [r for r in records if r.get("arm") == "claude"]
 
     # Membership error rate = incorrect answers / total queries (what
@@ -490,8 +542,7 @@ def cmd_plot(args: argparse.Namespace) -> None:
     # The x-axis is the total compaction budget in Kbits. Bloom's frontier is
     # a per-item rate, so convert with the (shared) item count n.
     n_items = records[0]["n"] if records else 1
-    # Budget = raw size in bits of the natural-language summary (chars x 8),
-    # the space the summary actually occupies in the context window.
+    # Budget is the raw summary size in bits, chars times 8.
     totals = [r["summary_chars"] * 8 / 1000 for r in records]
 
     fig, ax = plt.subplots(figsize=(6, 4.0))
@@ -591,6 +642,9 @@ def main() -> None:
     run_p.add_argument("--num-queries", type=int, default=200,
                        help="total queries; half members, half non-members")
     run_p.add_argument("--seed", type=int, default=42)
+    run_p.add_argument("--no-compaction", action="store_true",
+                       help="control: keep the full set in context to isolate "
+                       "the model's answering error")
     run_p.add_argument("--claude-model", default=CLAUDE_MODEL)
     run_p.add_argument("--openai-model", default=OPENAI_MODEL)
     run_p.add_argument("--urls-csv", type=Path,
